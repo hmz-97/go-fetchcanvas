@@ -8,6 +8,7 @@ import (
 	"os"
 	"io"
 	"encoding/json"
+	"path/filepath"
 )
 
 type Module struct {
@@ -22,6 +23,12 @@ type ModuleItem struct {
 
 type FileItem struct {
 	Url string `json:"url"`
+}
+
+type FileObj struct {
+	Url string `json:"url"`
+	LockedForUser bool `json:"locked_for_user"`
+	Title string `json:"display_name"`
 }
 
 func main() {
@@ -63,51 +70,64 @@ func main() {
 		os.Exit(1)
 	}
 
-	req.header.add("authorization", "bearer " + *token)
-	resp, err := client.do(req)
+	req.Header.Add("Authorization", "Bearer " + *token)
+	resp, err := client.Do(req)
 
-	if err != nil {
-		fmt.printf("error with response %v\n", err)
-		os.exit(1)
+	if resp.StatusCode != http.StatusOK {
+	    body, _ := io.ReadAll(resp.Body)
+	    fmt.Fprintf(os.Stderr, "unexpected status %s: %s\n", resp.Status, body)
+	    os.Exit(1)
 	}
 
-	body, err := io.readall(resp.body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.printf("error with response %v\n", err)
-		os.exit(1)
+		fmt.Printf("error with response %v\n", err)
+		os.Exit(1)
 	}
 
-	defer resp.body.close()
+	defer resp.Body.Close()
 
 
 	var modules []Module
 
-	err = json.unmarshal(body, &modules)
+	err = json.Unmarshal(body, &modules)
 	if err != nil {
-		fmt.printf("error with response %v\n", err)
-		os.exit(1)
+		fmt.Printf("error with response %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.printf("found modules %v", modules)
+	fmt.Printf("found modules %v", modules)
 
 	var moduleitems []ModuleItem
 	tok := *token
 	itemtype := "File"
 	for _, m := range modules {
-		items, err = GetAndFilterModuleItems(m.ItemsUrl, itemtype, tok)
+		items, err := GetAndFilterModuleItems(m.ItemsUrl, itemtype, tok)
 		if err != nil {
 			fmt.Printf("%v", err)
 			os.Exit(1)
 		}
 
-		moduleitems = append(moduleitems, items)
+		moduleitems = append(moduleitems, items...)
 	}
-
-	fmt.printf("found modules %v", moduleitems)
-
+	var fileobjs []FileObj
+	for _, m := range moduleitems {
+		fileobj, err := GetFileObjFromUrl(m.Url, tok)
+		if err != nil {
+			fmt.Printf("%v", err)
+			os.Exit(1)
+		}
+	fileobjs = append(fileobjs, fileobj)
+	}
+	
+	dt := *dest
+	for _, m := range fileobjs {
+		err = DownloadFromFileObj(m, dt, tok)
+		fmt.Printf("Downloading %v\n", m.Title)
+	}
 }
 
-func GetAndFilterModuleItems(string itemsUrl, string itemtype, string token) ([]ModuleItem, error) {
+func GetAndFilterModuleItems(itemsUrl string, itemtype string, token string) ([]ModuleItem, error) {
 
 
 	client := &http.Client{}
@@ -117,34 +137,107 @@ func GetAndFilterModuleItems(string itemsUrl, string itemtype, string token) ([]
 		return nil, err
 	}
 
-	req.header.add("authorization", "bearer " + token)
-	resp, err := client.do(req)
+	req.Header.Add("Authorization", "Bearer " + token)
+	resp, err := client.Do(req)
 
+	if resp.StatusCode != http.StatusOK {
+	    body, _ := io.ReadAll(resp.Body)
+	    return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := io.readall(resp.body)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.body.close()
+	defer resp.Body.Close()
 
 	var moduleitems []ModuleItem
 
-	err = json.unmarshal(body, &moduleitems)
+	err = json.Unmarshal(body, &moduleitems)
 	if err != nil {
 		return nil, err	
 	}
 
 	var result []ModuleItem
 
-	for i, m in range(result) {
-		if m.Type == "File" {
-			result.append(m)
+	for _, m := range(moduleitems) {
+		if m.Type == itemtype {
+			result = append(result, m)
 		}
 	}
 
 	return result, nil
+}
+
+
+func GetFileObjFromUrl(fileobjurl string, token string) (FileObj, error) {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", fileobjurl, nil)
+	
+	if err != nil {
+		return FileObj{}, err
+	}
+
+	req.Header.Add("Authorization", "Bearer " + token)
+	resp, err := client.Do(req)
+
+	if resp.StatusCode != http.StatusOK {
+	    body, _ := io.ReadAll(resp.Body)
+	    return FileObj{}, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return FileObj{}, err
+	}
+
+	defer resp.Body.Close()
+
+	var fileobj FileObj
+
+	err = json.Unmarshal(body, &fileobj)
+	if err != nil {
+		return FileObj{}, err	
+	}
+
+
+	return fileobj, nil
+}
+
+func DownloadFromFileObj(fileobj FileObj, dest string, token string) (error) {
+
+	if fileobj.LockedForUser == true {
+		fmt.Printf("skipping locked file")
+		return nil
+	}
+	os.MkdirAll(dest, 0o755)
+	
+	path := filepath.Join(dest, fileobj.Title)
+
+	client := &http.Client{}
+		req, err := http.NewRequest("GET", fileobj.Url, nil)
+		
+		if err != nil {
+			return err
+		}
+
+		req.Header.Add("Authorization", "Bearer " + token)
+		resp, err := client.Do(req)
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+		    body, _ := io.ReadAll(resp.Body)
+		    return fmt.Errorf("unexpected status %s: %s", resp.Status, body)
+		}
+
+	file, err := os.Create(path)
+	defer file.Close()
+
+	_, err = io.Copy(file, resp.Body)
+	if err != nil {
+		os.Remove(path)
+		return err	
+	}
+	return nil
 }
