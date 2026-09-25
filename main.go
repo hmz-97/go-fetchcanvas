@@ -5,6 +5,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"flag"
 	"net/http"
+	"sync"
 	"os"
 	"io"
 	"encoding/json"
@@ -59,7 +60,6 @@ func main() {
 	// to be removed later, just for ease
 	fmt.Printf("dest used is %s\n", *dest)
 	fmt.Printf("course used is %s\n", *course)
-	fmt.Printf("token used is %s\n", *token)
 
 	// 3. now, try the http connection
 	client := &http.Client{}
@@ -96,13 +96,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("found modules %v", modules)
-
 	var moduleitems []ModuleItem
 	tok := *token
 	itemtype := "File"
 	for _, m := range modules {
-		items, err := GetAndFilterModuleItems(m.ItemsUrl, itemtype, tok)
+		items, err := GetAndFilterModuleItems(client, m.ItemsUrl, itemtype, tok)
 		if err != nil {
 			fmt.Printf("%v", err)
 			os.Exit(1)
@@ -112,7 +110,7 @@ func main() {
 	}
 	var fileobjs []FileObj
 	for _, m := range moduleitems {
-		fileobj, err := GetFileObjFromUrl(m.Url, tok)
+		fileobj, err := GetFileObjFromUrl(client, m.Url, tok)
 		if err != nil {
 			fmt.Printf("%v", err)
 			os.Exit(1)
@@ -121,16 +119,29 @@ func main() {
 	}
 	
 	dt := *dest
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+
 	for _, m := range fileobjs {
-		err = DownloadFromFileObj(m, dt, tok)
-		fmt.Printf("Downloading %v\n", m.Title)
-	}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func()  {<- sem} ()
+			fmt.Printf("Downloading %v\n", m.Title)
+			err := DownloadFromFileObj(client, m, dt, tok)
+			if err != nil {
+				fmt.Printf("Error downloading %v\n", m.Title)
+			}
+	}()
+
+}
+	wg.Wait()
 }
 
-func GetAndFilterModuleItems(itemsUrl string, itemtype string, token string) ([]ModuleItem, error) {
+func GetAndFilterModuleItems(client *http.Client, itemsUrl string, itemtype string, token string) ([]ModuleItem, error) {
 
 
-	client := &http.Client{}
 	req, err := http.NewRequest("GET", itemsUrl, nil)
 	
 	if err != nil {
@@ -171,8 +182,7 @@ func GetAndFilterModuleItems(itemsUrl string, itemtype string, token string) ([]
 }
 
 
-func GetFileObjFromUrl(fileobjurl string, token string) (FileObj, error) {
-	client := &http.Client{}
+func GetFileObjFromUrl(client *http.Client, fileobjurl string, token string) (FileObj, error) {
 	req, err := http.NewRequest("GET", fileobjurl, nil)
 	
 	if err != nil {
@@ -205,7 +215,7 @@ func GetFileObjFromUrl(fileobjurl string, token string) (FileObj, error) {
 	return fileobj, nil
 }
 
-func DownloadFromFileObj(fileobj FileObj, dest string, token string) (error) {
+func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, token string) (error) {
 
 	if fileobj.LockedForUser == true {
 		fmt.Printf("skipping locked file")
@@ -215,21 +225,20 @@ func DownloadFromFileObj(fileobj FileObj, dest string, token string) (error) {
 	
 	path := filepath.Join(dest, fileobj.Title)
 
-	client := &http.Client{}
-		req, err := http.NewRequest("GET", fileobj.Url, nil)
-		
-		if err != nil {
-			return err
-		}
+	req, err := http.NewRequest("GET", fileobj.Url, nil)
+	
+	if err != nil {
+		return err
+	}
 
-		req.Header.Add("Authorization", "Bearer " + token)
-		resp, err := client.Do(req)
-		defer resp.Body.Close()
+	req.Header.Add("Authorization", "Bearer " + token)
+	resp, err := client.Do(req)
+	defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-		    body, _ := io.ReadAll(resp.Body)
-		    return fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-		}
+	if resp.StatusCode != http.StatusOK {
+	    body, _ := io.ReadAll(resp.Body)
+	    return fmt.Errorf("unexpected status %s: %s", resp.Status, body)
+	}
 
 	file, err := os.Create(path)
 	defer file.Close()
