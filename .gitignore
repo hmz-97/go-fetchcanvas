@@ -1,0 +1,12 @@
+# built binaries
+fetch1
+fetch2
+fetchcanvas
+
+# contains the Canvas token
+config.toml
+
+# benchmark output
+*.csv
+times.txt
+bin/*
