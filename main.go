@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"github.com/BurntSushi/toml"
+	"io/fs"
+	"errors"
 	"flag"
 	"net/http"
 	"sync"
@@ -219,6 +221,15 @@ func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, toke
 	
 	path := filepath.Join(dest, fileobj.Title)
 
+	exists, err := fileExists(path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		fmt.Printf("Skipping existing file %v\n", path)
+		return nil
+	}
+
 	req, err := http.NewRequest("GET", fileobj.Url, nil)
 	
 	if err != nil {
@@ -226,6 +237,7 @@ func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, toke
 	}
 
 	req.Header.Add("Authorization", "Bearer " + token)
+	fmt.Printf("Downloading %v\n", fileobj.Title)
 	resp, err := client.Do(req)
 	defer resp.Body.Close()
 
@@ -251,11 +263,22 @@ func processFileItem(client *http.Client, fileobjurl string, dest string, token 
 		return err
 	}
 
-	fmt.Printf("Downloading %v\n", fileobj.Title)
 
 	err = DownloadFromFileObj(client, fileobj, dest, token)
 	if err != nil {
 		return fmt.Errorf("Error downloading file %v: %w", fileobj.Title, err)
 	}
 	return nil
+}
+
+func fileExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	} else {
+		return true, nil
+	}
+
 }
