@@ -8,6 +8,7 @@ import (
 	"sync"
 	"os"
 	"io"
+	"time"
 	"encoding/json"
 	"path/filepath"
 )
@@ -62,8 +63,14 @@ func main() {
 	fmt.Printf("course used is %s\n", *course)
 
 	// 3. now, try the http connection
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/courses/" + *course +"/modules", nil)
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 10,
+		},
+	}
+
+	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/courses/" + *course +"/modules?per_page=100", nil)
 	
 	if err != nil {
 		fmt.Printf("error with creating request %v\n", err)
@@ -108,33 +115,20 @@ func main() {
 
 		moduleitems = append(moduleitems, items...)
 	}
-	var fileobjs []FileObj
-	for _, m := range moduleitems {
-		fileobj, err := GetFileObjFromUrl(client, m.Url, tok)
-		if err != nil {
-			fmt.Printf("%v", err)
-			os.Exit(1)
-		}
-	fileobjs = append(fileobjs, fileobj)
-	}
-	
 	dt := *dest
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
-
-	for _, m := range fileobjs {
+	sem := make(chan struct{}, 10)
+	for _, m := range moduleitems {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func()  {<- sem} ()
-			fmt.Printf("Downloading %v\n", m.Title)
-			err := DownloadFromFileObj(client, m, dt, tok)
+			err := processFileItem(client, m.Url, dt, tok)
 			if err != nil {
-				fmt.Printf("Error downloading %v\n", m.Title)
+				fmt.Printf("Error downloading.")
 			}
 	}()
-
 }
 	wg.Wait()
 }
@@ -247,6 +241,21 @@ func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, toke
 	if err != nil {
 		os.Remove(path)
 		return err	
+	}
+	return nil
+}
+
+func processFileItem(client *http.Client, fileobjurl string, dest string, token string) (error) {
+	fileobj, err := GetFileObjFromUrl(client, fileobjurl, token)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Downloading %v\n", fileobj.Title)
+
+	err = DownloadFromFileObj(client, fileobj, dest, token)
+	if err != nil {
+		return fmt.Errorf("Error downloading file %v: %w", fileobj.Title, err)
 	}
 	return nil
 }
