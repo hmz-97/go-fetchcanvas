@@ -8,6 +8,7 @@ import (
 	"flag"
 	"net/http"
 	"sync"
+	"strconv"
 	"os"
 	"io"
 	"time"
@@ -37,9 +38,15 @@ type FileObj struct {
 
 type Config struct {
 
-	Dest string `toml:"dest"`
+	Dir string `toml:"dest"`
 	Token string `toml:"token"`
-	Course string `toml:"course"`
+}
+
+type Submission struct {
+	Score *float64 `json:"score"`
+	Grade *string `json:"grade"`
+	WorkflowState string `json:"workflow_state"`
+	GradedAt *string `json:"graded_at"`
 }
 
 type Announcement struct {
@@ -55,6 +62,7 @@ type Assignment struct {
 	CourseId int `json:"course_id"`
 	PointsPossible float64 `json:"points_possible"`
 	Submitted bool `json:"has_submitted_submissions"`
+	Submission *Submission `json:"submission,omitempty"`
 }
 
 type Course struct {
@@ -87,20 +95,37 @@ func main() {
 		},
 	}
 	switch os.Args[1] {
+
+		case "mcp":
+			fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+			token := fs.String("token", config.Token, "Canvas API token")
+			dest := fs.String("dest", config.Dir, "download directory")
+			fs.Parse(os.Args[2:])
+			config.Token, config.Dir = *token, *dest
+
+			if config.Token == "" {
+				fmt.Fprintln(os.Stderr, "mcp: no API token (set API_TOKEN, config file, or --token)")
+				os.Exit(1)
+			}
+			if err := runMCP(client, config); err != nil {
+				fmt.Fprintln(os.Stderr, "mcp:", err)
+				os.Exit(1)
+			}
+
 		case "directory": // list directory
-			if config.Dest == "" {
+			if config.Dir == "" {
 				fmt.Println("No destination dir in config")
 				os.Exit(1)
 			}
-			fmt.Println("Destination directory is " +config.Dest)
+			fmt.Println("Destination directory is " +config.Dir)
 
 		case "files": // get files for course
 
 
 			fs := flag.NewFlagSet("assignments", flag.ExitOnError)
 			token := fs.String("token", config.Token, "Canvas API token")
-			course := fs.String("courseid", config.Course, "Course id number")
-			dest := fs.String("dest", config.Dest, "directory")
+			course := fs.String("courseid", "", "Course id number")
+			dest := fs.String("dest",config.Dir, "directory")
 			fs.Parse(os.Args[2:])
 			
 			if *dest == "" || *course == "" || *token == "" {
@@ -118,7 +143,7 @@ func main() {
 
 			fs := flag.NewFlagSet("assignments", flag.ExitOnError)
 			token := fs.String("token", config.Token, "Canvas API token")
-			course := fs.String("courseid", config.Course, "Course id number")
+			course := fs.String("courseid", "", "Course id number")
 			fs.Parse(os.Args[2:])
 
 			announcements, err := getAnnouncementsForCourse(client, *course, *token)
@@ -131,7 +156,7 @@ func main() {
 		case "assignments": // get assignments (tasks) for course 
 			fs := flag.NewFlagSet("assignments", flag.ExitOnError)
 			token := fs.String("token", config.Token, "Canvas API token")
-			course := fs.String("courseid", config.Course, "Course id number")
+			course := fs.String("courseid", "", "Course id number")
 			fs.Parse(os.Args[2:])
 		
 			assignments, err := getAssignmentsForCourse(client, *course, *token)
@@ -160,11 +185,26 @@ func main() {
 
 }
 
+func getCourseNameFromId(client *http.Client, token string, course string) string {
+// fires a quick request to get the course name. needed because we are passing the course
+// as a number. for a refactor, can simply pick all numbers of courses with names and pick with huh
+// but for now will keep this for organizing and pass the param down.
+	courses, err := getCoursesForUser(client, token)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Could not get courses for user to dervie name")
+		return ""
+	}
+	for _, c := range courses {
+		if course == strconv.Itoa(c.CourseId) {
+			return c.Name
+	}
+}
+	return "" // no course matches.
+}
+
 func getAllFilesForCourse(client *http.Client, course string, dest string, token string) (error) {
 
-	// to be removed later, just for ease
-	fmt.Printf("dest used is %s\n", dest)
-	fmt.Printf("course used is %s\n", course)
+	coursename := getCourseNameFromId(client, token, course)
 
 	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/courses/" + course +"/modules?per_page=100", nil)
 	
@@ -215,7 +255,7 @@ func getAllFilesForCourse(client *http.Client, course string, dest string, token
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func()  {<- sem} ()
-			err := processFileItem(client, m.Url, dt, tok)
+			err := processFileItem(client, m.Url, dt, tok, coursename)
 			if err != nil {
 				fmt.Printf("Error downloading.")
 			}
@@ -229,37 +269,16 @@ func getAllFilesForCourse(client *http.Client, course string, dest string, token
 func GetAndFilterModuleItems(client *http.Client, itemsUrl string, itemtype string, token string) ([]ModuleItem, error) {
 
 
-	req, err := http.NewRequest("GET", itemsUrl, nil)
-	
-	if err != nil {
+
+	var items []ModuleItem
+
+	if err := getJSON(client, itemsUrl+"?per_page=100", token, &items); err != nil {
 		return nil, err
-	}
-
-	req.Header.Add("Authorization", "Bearer " + token)
-	resp, err := client.Do(req)
-
-	if resp.StatusCode != http.StatusOK {
-	    body, _ := io.ReadAll(resp.Body)
-	    return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
-	var moduleitems []ModuleItem
-
-	err = json.Unmarshal(body, &moduleitems)
-if err != nil {
-		return nil, err	
 	}
 
 	var result []ModuleItem
 
-	for _, m := range(moduleitems) {
+	for _, m := range(items) {
 		if m.Type == itemtype {
 			result = append(result, m)
 		}
@@ -269,48 +288,23 @@ if err != nil {
 }
 
 
-func GetFileObjFromUrl(client *http.Client, fileobjurl string, token string) (FileObj, error) {
-	req, err := http.NewRequest("GET", fileobjurl, nil)
-	
-	if err != nil {
-		return FileObj{}, err
-	}
-
-	req.Header.Add("Authorization", "Bearer " + token)
-	resp, err := client.Do(req)
-
-	if resp.StatusCode != http.StatusOK {
-	    body, _ := io.ReadAll(resp.Body)
-	    return FileObj{}, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return FileObj{}, err
-	}
-
-	defer resp.Body.Close()
+func getFileObjFromUrl(client *http.Client, fileobjurl string, token string) (FileObj, error) {
 
 	var fileobj FileObj
+	err := getJSON(client, fileobjurl, token, &fileobj)
 
-	err = json.Unmarshal(body, &fileobj)
-	if err != nil {
-		return FileObj{}, err	
-	}
-
-
-	return fileobj, nil
+	return fileobj, err
 }
 
-func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, token string) (error) {
+func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, token string, coursename string) (error) {
 
 	if fileobj.LockedForUser == true {
 		fmt.Printf("skipping locked file")
 		return nil
 	}
-	os.MkdirAll(dest, 0o755)
+	os.MkdirAll(filepath.Join(dest, coursename), 0o755)
 	
-	path := filepath.Join(dest, fileobj.Title)
+	path := filepath.Join(dest, coursename, fileobj.Title)
 
 	exists, err := fileExists(path)
 	if err != nil {
@@ -348,14 +342,14 @@ func DownloadFromFileObj(client *http.Client, fileobj FileObj, dest string, toke
 	return nil
 }
 
-func processFileItem(client *http.Client, fileobjurl string, dest string, token string) (error) {
-	fileobj, err := GetFileObjFromUrl(client, fileobjurl, token)
+func processFileItem(client *http.Client, fileobjurl string, dest string, token string, coursename string) (error) {
+	fileobj, err := getFileObjFromUrl(client, fileobjurl, token)
 	if err != nil {
 		return err
 	}
 
 
-	err = DownloadFromFileObj(client, fileobj, dest, token)
+	err = DownloadFromFileObj(client, fileobj, dest, token, coursename)
 	if err != nil {
 		return fmt.Errorf("Error downloading file %v: %w", fileobj.Title, err)
 	}
@@ -389,101 +383,86 @@ func configPath() (string, error) {
 }
 
 func getConfig(config *Config) (error) {
+	// here i need the order: if env passes, use env. if not, check file, no file, send defaults
 
-	path, err := configPath()
-	_, err = toml.DecodeFile(path, &config)
+	// first let's fill the default dir. there's no default token.
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		home = ""
 	}
+	config.Dir = home
+
+	// file stuff overwriting the defaults
+	path, err := configPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "can't find the path to read config file, ", err)
+	}
+	_, err = toml.DecodeFile(path, config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not read config file: ", err)
+	}
+
+	// env stuff overwriting the file
+	dir, dir_ok := os.LookupEnv("DESTINATION_FOLDER")
+	tok, tok_ok:= os.LookupEnv("API_TOKEN")
+
+	if dir_ok {
+		config.Dir = dir
+	}
+
+	if tok_ok {
+		config.Token = tok
+	}
+
+	
 	return nil
 }
+
 func getAssignmentsForCourse(client *http.Client, courseid string, token string) ([]Assignment, error) {
 
 
-	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/courses/" + courseid + "/assignments/", nil)
-	req.Header.Add("Authorization", "Bearer " + token)
-
-	resp, err := client.Do(req)
-
-	if resp.StatusCode != http.StatusOK {
-	    body, _ := io.ReadAll(resp.Body)
-	    return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
 	var assignments []Assignment
 
-	err = json.Unmarshal(body, &assignments)
-	if err != nil {
-		return nil, err	
-	}
+	err := getJSON(client, "https://canvas.cmu.edu/api/v1/courses/"+courseid+"/assignments?include[]=submission&per_page=100", token, &assignments)
 
-	return assignments, nil
+	return assignments, err
 
 }
 func getAnnouncementsForCourse(client *http.Client, courseid string, token string) ([]Announcement, error) {
 
 
-	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/announcements?context_codes[]=course_" + courseid, nil)
-	req.Header.Add("Authorization", "Bearer " + token)
-
-	resp, err := client.Do(req)
-
-	if resp.StatusCode != http.StatusOK {
-	    body, _ := io.ReadAll(resp.Body)
-	    return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
 	var announcements []Announcement
 
-	err = json.Unmarshal(body, &announcements)
-	if err != nil {
-		return nil, err	
-	}
+	err := getJSON(client, "https://canvas.cmu.edu/api/v1/announcements?context_codes[]=course_"+courseid, token, &announcements)
 
-	return announcements, nil
+	return announcements, err
 
 }
 
 
 func getCoursesForUser(client *http.Client, token string) ([]Course, error) {
 
-	req, err := http.NewRequest("GET", "https://canvas.cmu.edu/api/v1/courses/", nil)
-	req.Header.Add("Authorization", "Bearer " + token)
+	var courses []Course
+	err := getJSON(client, "https://canvas.cmu.edu/api/v1/courses?per_page=100", token, &courses)
+	return courses, err
+}
+
+func getJSON(client *http.Client, url, token string, out any) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
 
 	resp, err := client.Do(req)
-
-	if resp.StatusCode != http.StatusOK {
-	    body, _ := io.ReadAll(resp.Body)
-	    return nil, fmt.Errorf("unexpected status %s: %s", resp.Status, body)
-	}
-
-	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
 	defer resp.Body.Close()
 
-	var courses []Course
-
-	err = json.Unmarshal(body, &courses)
-	if err != nil {
-		return nil, err	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status %s: %s", resp.Status, body)
 	}
-
-	return courses, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
