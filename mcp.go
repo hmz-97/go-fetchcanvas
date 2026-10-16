@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"log"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -22,21 +23,21 @@ type DownloadOut struct {
 	Dir string `json:"dir"`
 }
 
-func runMCP(client *http.Client, cfg Config) (error) {
-
+// newServer registers all tools. local=true adds tools that write to the user's own disk.
+func newServer(client *http.Client, cfg Config, local bool) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "mycanvas", Version: "v0.1.0"}, nil)
 
 	mcp.AddTool(s, &mcp.Tool{Name: "list_courses", Description: "List the user's Canvas courses with their IDs"},
-	func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, CoursesOut, error) {
-		c, err := getCoursesForUser(client, cfg.Token)
-		return nil, CoursesOut{c}, err
-	})
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, CoursesOut, error) {
+			c, err := getCoursesForUser(client, cfg.Token)
+			return nil, CoursesOut{c}, err
+		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "list_assignments", Description: "List assignments for a course"},
-	func(ctx context.Context, _ *mcp.CallToolRequest, in CourseIn) (*mcp.CallToolResult, AssignmentsOut, error) {
-		a, err := getAssignmentsForCourse(client, in.CourseID, cfg.Token)
-		return nil, AssignmentsOut{a}, err
-	})
+		func(ctx context.Context, _ *mcp.CallToolRequest, in CourseIn) (*mcp.CallToolResult, AssignmentsOut, error) {
+			a, err := getAssignmentsForCourse(client, in.CourseID, cfg.Token)
+			return nil, AssignmentsOut{a}, err
+		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "list_announcements", Description: "List announcements for a course"},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in CourseIn) (*mcp.CallToolResult, AnnouncementsOut, error) {
@@ -44,12 +45,31 @@ func runMCP(client *http.Client, cfg Config) (error) {
 			return nil, AnnouncementsOut{a}, err
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "download_course_files", Description: "Download all module files for a course into the configured folder"},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in CourseIn) (*mcp.CallToolResult, DownloadOut, error) {
-			err := getAllFilesForCourse(client, in.CourseID, cfg.Dir, cfg.Token)
-			return nil, DownloadOut{Dir: cfg.Dir}, err
-		})
+	if local {
+		mcp.AddTool(s, &mcp.Tool{Name: "download_course_files", Description: "Download all module files for a course into the configured folder"},
+			func(ctx context.Context, _ *mcp.CallToolRequest, in CourseIn) (*mcp.CallToolResult, DownloadOut, error) {
+				err := getAllFilesForCourse(client, in.CourseID, cfg.Dir, cfg.Token)
+				return nil, DownloadOut{Dir: cfg.Dir}, err
+			})
+	}
 
-return s.Run(context.Background(), &mcp.StdioTransport{})
+	return s
 }
 
+// runMCP serves over stdio when httpAddr is empty, otherwise over HTTP at httpAddr.
+func runMCP(client *http.Client, cfg Config, httpAddr string) error {
+	if httpAddr == "" {
+		return newServer(client, cfg, true).Run(context.Background(), &mcp.StdioTransport{})
+	}
+
+	authCfg, err := authConfigFromEnv() // refuses to start without auth config
+	if err != nil {
+		return err
+	}
+	s := newServer(client, cfg, false)
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+
+	log.Printf("serving MCP on %s%s (public %s, auth via %s)", httpAddr, authCfg.Path, authCfg.Resource, authCfg.Issuer)
+
+	return http.ListenAndServe(httpAddr, protectedHandler(mcpHandler, authCfg, client))
+}

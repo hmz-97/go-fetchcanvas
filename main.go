@@ -99,6 +99,7 @@ func main() {
 		case "mcp":
 			fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 			token := fs.String("token", config.Token, "Canvas API token")
+			httpAddr := fs.String("http", "", "serve http at this address")
 			dest := fs.String("dest", config.Dir, "download directory")
 			fs.Parse(os.Args[2:])
 			config.Token, config.Dir = *token, *dest
@@ -107,7 +108,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "mcp: no API token (set API_TOKEN, config file, or --token)")
 				os.Exit(1)
 			}
-			if err := runMCP(client, config); err != nil {
+			if err := runMCP(client, config, *httpAddr); err != nil {
 				fmt.Fprintln(os.Stderr, "mcp:", err)
 				os.Exit(1)
 			}
